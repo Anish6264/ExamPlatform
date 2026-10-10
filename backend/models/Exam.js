@@ -6,14 +6,11 @@ const questionSchema = new mongoose.Schema({
     required: true,
     trim: true
   },
-  options: {
-    type: [String],
-    validate: value => value.length >= 2
-  },
-  correctIndex: {
-    type: Number,
-    default: null
-  },
+  questionType: { type: String, enum: ["mcq", "integer", "numeric"], default: "mcq" },
+  options: { type: [String], default: [] },
+  correctIndex: { type: Number, default: null },
+  correctValue: { type: String, default: "", trim: true },
+  answerTolerance: { type: Number, default: 0, min: 0 },
   explanation: {
     type: String,
     default: ""

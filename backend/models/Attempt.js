@@ -7,7 +7,7 @@ const attemptSchema = new mongoose.Schema({
   startedAt: { type: Date, required: true },
   deadlineAt: { type: Date, required: true },
   submittedAt: { type: Date, default: null },
-  answers: { type: Map, of: Number, default: {} },
+  answers: { type: Map, of: mongoose.Schema.Types.Mixed, default: {} },
   status: { type: String, enum: ["in-progress", "submitted"], default: "in-progress" },
   result: {
     correct: { type: Number, default: 0 },

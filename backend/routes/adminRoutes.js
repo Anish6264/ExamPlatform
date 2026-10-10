@@ -2,6 +2,7 @@ import { Router } from "express";
 import mongoose from "mongoose";
 import Exam from "../models/Exam.js";
 import Attempt from "../models/Attempt.js";
+import User from "../models/User.js";
 import { adminAuth } from "../middleware/auth.js";
 
 const router = Router();
@@ -9,7 +10,7 @@ router.use(adminAuth);
 
 function getAnswerKeyStatus(exam) {
   if (exam.answerKeyStatus === "admin-verified") return "admin-verified";
-  return exam.questions.some(q => q.correctIndex !== null && q.correctIndex !== undefined)
+  return exam.questions.some(q => (q.questionType || "mcq") === "mcq" ? q.correctIndex !== null && q.correctIndex !== undefined : Boolean(String(q.correctValue || "").trim()))
     ? "user-provided"
     : "missing";
 }
@@ -25,8 +26,8 @@ function summarize(exam, attemptCount = 0) {
     creatorId: String(exam.user),
     durationMinutes: exam.durationMinutes,
     questionCount: exam.questions.length,
-    answeredCount: exam.questions.filter(q => q.correctIndex !== null && q.correctIndex !== undefined).length,
-    missingCount: exam.questions.filter(q => q.correctIndex === null || q.correctIndex === undefined).length,
+    answeredCount: exam.questions.filter(q => (q.questionType || "mcq") === "mcq" ? q.correctIndex !== null && q.correctIndex !== undefined : Boolean(String(q.correctValue || "").trim())).length,
+    missingCount: exam.questions.filter(q => (q.questionType || "mcq") === "mcq" ? q.correctIndex === null || q.correctIndex === undefined : !String(q.correctValue || "").trim()).length,
     answerKeyStatus: status,
     attemptCount,
     createdAt: exam.createdAt
@@ -45,7 +46,10 @@ router.get("/exams", async (_req, res, next) => {
       ? await Attempt.aggregate([{ $match: { exam: { $in: ids } } }, { $group: { _id: "$exam", count: { $sum: 1 } } }])
       : [];
     const countMap = new Map(counts.map(x => [String(x._id), x.count]));
-    const summaries = exams.map(e => summarize(e, countMap.get(String(e._id)) || 0));
+    const creatorIds = [...new Set(exams.map(e => String(e.user)))];
+    const creators = await User.find({ _id: { $in: creatorIds } }).select("name");
+    const creatorNames = new Map(creators.map(user => [String(user._id), user.name]));
+    const summaries = exams.map(e => ({ ...summarize(e, countMap.get(String(e._id)) || 0), uploaderName: creatorNames.get(String(e.user)) || "Unknown user" }));
     summaries.sort((a, b) => b.missingCount - a.missingCount || new Date(b.createdAt) - new Date(a.createdAt));
     res.json({ exams: summaries });
   } catch (error) { next(error); }
@@ -105,6 +109,16 @@ router.put("/exams/:id/answer-key", async (req, res, next) => {
     exam.answerKeyStatus = allHaveKeys ? "admin-verified" : (exam.questions.some(q => q.correctIndex !== null && q.correctIndex !== undefined) ? "user-provided" : "missing");
     await exam.save();
     res.json({ message: allHaveKeys ? "Answer key saved and verified." : "Answer key saved, but some questions still need answers.", exam: summarize(exam) });
+  } catch (error) { next(error); }
+});
+
+// Remove a paper from the public library without destroying historical attempts.
+router.delete("/exams/:id", async (req, res, next) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) return res.status(404).json({ message: "Paper not found." });
+    const exam = await Exam.findByIdAndUpdate(req.params.id, { $set: { isPublic: false } }, { new: true });
+    if (!exam) return res.status(404).json({ message: "Paper not found." });
+    res.json({ message: "Paper removed from the public library. Existing attempts have been preserved." });
   } catch (error) { next(error); }
 });
 

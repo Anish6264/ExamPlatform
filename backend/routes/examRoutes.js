@@ -2,6 +2,7 @@ import { Router } from "express";
 import mongoose from "mongoose";
 import Exam from "../models/Exam.js";
 import Attempt from "../models/Attempt.js";
+import User from "../models/User.js";
 import { auth } from "../middleware/auth.js";
 
 const router = Router();
@@ -14,14 +15,13 @@ function cleanQuestions(input) {
   return input.map((question, index) => {
     const text = String(question.text || "").trim();
 
+    const questionType = ["integer", "numeric"].includes(question.questionType) ? question.questionType : "mcq";
     const options = Array.isArray(question.options)
       ? question.options.map(option => String(option || "").trim())
       : [];
 
-    if (!text || options.length < 2 || options.some(option => !option)) {
-      throw new Error(
-        `Question ${index + 1} needs text and at least two non-empty options.`
-      );
+    if (!text || (questionType === "mcq" && (options.length < 2 || options.some(option => !option)))) {
+      throw new Error(`Question ${index + 1} needs text and ${questionType === "mcq" ? "at least two non-empty options" : "a valid question type"}.`);
     }
 
     const raw = question.correctIndex;
@@ -42,10 +42,15 @@ function cleanQuestions(input) {
       throw new Error(`Question ${index + 1} has an invalid answer key.`);
     }
 
+    const correctValue = String(question.correctValue ?? "").trim();
+    if (questionType !== "mcq" && !correctValue) {
+      throw new Error(`Question ${index + 1} needs a correct numeric answer.`);
+    }
     return {
-      text,
-      options,
-      correctIndex,
+      text, questionType, options,
+      correctIndex: questionType === "mcq" ? correctIndex : null,
+      correctValue,
+      answerTolerance: Math.max(0, Number(question.answerTolerance || 0)),
       explanation: String(question.explanation || "").trim()
     };
   });
@@ -61,13 +66,11 @@ function publicExamSummary(exam) {
     isPublic: exam.isPublic,
     durationMinutes: exam.durationMinutes,
     questionCount: exam.questions.length,
-    hasAnswerKey:
-      exam.questions.length > 0 &&
-      exam.questions.every(
-        question =>
-          question.correctIndex !== null &&
-          question.correctIndex !== undefined
-      ),
+    hasAnswerKey: exam.questions.length > 0 && exam.questions.every(question =>
+      (question.questionType || "mcq") === "mcq"
+        ? question.correctIndex !== null && question.correctIndex !== undefined
+        : Boolean(String(question.correctValue || "").trim())
+    ),
     answerKeyStatus: exam.answerKeyStatus || "missing",
     createdAt: exam.createdAt,
     updatedAt: exam.updatedAt
@@ -114,7 +117,7 @@ router.get("/public", auth, async (req, res, next) => {
 
     const exams = await Exam.find(filter)
       .select(
-        "title subject year description durationMinutes questions isPublic answerKeyStatus answerKeyFileName createdAt updatedAt"
+        "title subject year description durationMinutes questions isPublic answerKeyStatus answerKeyFileName user createdAt updatedAt"
       )
       .sort({ createdAt: -1 })
       .limit(200);
@@ -132,9 +135,13 @@ router.get("/public", auth, async (req, res, next) => {
       counts.map(item => [String(item._id), item.count])
     );
 
+    const userIds = [...new Set(exams.map(exam => String(exam.user)))];
+    const users = await User.find({ _id: { $in: userIds } }).select("name");
+    const userNames = new Map(users.map(user => [String(user._id), user.name]));
     res.json({
       exams: exams.map(exam => ({
         ...publicExamSummary(exam),
+        uploaderName: userNames.get(String(exam.user)) || "PrepSpace user",
         attemptCount: countMap.get(String(exam._id)) || 0
       }))
     });
@@ -165,9 +172,13 @@ router.get("/", auth, async (req, res, next) => {
       counts.map(item => [String(item._id), item.count])
     );
 
+    const userIds = [...new Set(exams.map(exam => String(exam.user)))];
+    const users = await User.find({ _id: { $in: userIds } }).select("name");
+    const userNames = new Map(users.map(user => [String(user._id), user.name]));
     res.json({
       exams: exams.map(exam => ({
         ...publicExamSummary(exam),
+        uploaderName: userNames.get(String(exam.user)) || "PrepSpace user",
         attemptCount: countMap.get(String(exam._id)) || 0
       }))
     });
@@ -192,23 +203,21 @@ router.get("/:id", auth, async (req, res, next) => {
       return res.status(404).json({ message: "Exam not found." });
     }
 
-    if (String(exam.user) !== String(req.userId)) {
-      return res.json({
-        exam: {
-          ...publicExamSummary(exam),
-          questions: exam.questions.map(question => ({
-            id: question._id,
-            text: question.text,
-            options: question.options,
-            hasAnswerKey:
-              question.correctIndex !== null &&
-              question.correctIndex !== undefined
-          }))
-        }
-      });
-    }
-
-    res.json({ exam });
+    // Never return correct answers through the exam-detail endpoint, including to its creator.
+    res.json({
+      exam: {
+        ...publicExamSummary(exam),
+        questions: exam.questions.map(question => ({
+          id: question._id,
+          text: question.text,
+          questionType: question.questionType || "mcq",
+          options: question.options,
+          hasAnswerKey: (question.questionType || "mcq") === "mcq"
+            ? question.correctIndex !== null && question.correctIndex !== undefined
+            : Boolean(String(question.correctValue || "").trim())
+        }))
+      }
+    });
   } catch (error) {
     next(error);
   }
@@ -290,10 +299,10 @@ router.post("/", auth, async (req, res, next) => {
 
     const questions = cleanQuestions(req.body.questions);
 
-    const missingAnswerIndex = questions.findIndex(
-      question =>
-        question.correctIndex === null ||
-        question.correctIndex === undefined
+    const missingAnswerIndex = questions.findIndex(question =>
+      question.questionType === "mcq"
+        ? question.correctIndex === null || question.correctIndex === undefined
+        : !String(question.correctValue || "").trim()
     );
 
     if (missingAnswerIndex !== -1) {

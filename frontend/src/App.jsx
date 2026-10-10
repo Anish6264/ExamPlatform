@@ -859,6 +859,7 @@ function PublicLibraryPage() {
               {exam.description && (
                 <p className="library-description">{exam.description}</p>
               )}
+              <p className="muted small">Uploaded by {exam.uploaderName || "PrepSpace user"}</p>
 
               <div className="card-meta">
                 <span><Clock3 size={15} /> {exam.durationMinutes} min</span>
@@ -866,7 +867,7 @@ function PublicLibraryPage() {
               </div>
 
               <Link to={`/exam/${exam.id}`} className="secondary-button">
-                View paper <ArrowRight size={16} />
+                Attempt exam <ArrowRight size={16} />
               </Link>
             </article>
           ))}
@@ -1041,23 +1042,27 @@ function AdminPage({ onLogout }) {
 
           {exams.length ? (
             exams.map(item => (
-              <button
-                type="button"
-                key={item.id}
-                className={`admin-paper-item ${selectedId === item.id ? "selected" : ""}`}
-                onClick={() => openExam(item.id)}
-              >
-                <span className="admin-paper-title">{item.title}</span>
-                <span className="admin-paper-meta">
-                  {item.subject || "No subject"}
-                  {item.year ? ` · ${item.year}` : ""}
-                </span>
-                <span className={`pill ${item.missingCount === 0 ? "good" : "neutral"}`}>
-                  {item.missingCount === 0
-                    ? (item.answerKeyStatus === "admin-verified" ? "Verified" : "All keys set")
-                    : `${item.missingCount} key(s) missing`}
-                </span>
-              </button>
+              <div className="admin-paper-item-wrap" key={item.id}>
+                <button
+                  type="button"
+                  className={`admin-paper-item ${selectedId === item.id ? "selected" : ""}`}
+                  onClick={() => openExam(item.id)}
+                >
+                  <span className="admin-paper-title">{item.title}</span>
+                  <span className="admin-paper-meta">Uploaded by: {item.uploaderName || "Unknown user"}</span>
+                  <span className="admin-paper-meta">
+                    {item.subject || "No subject"}{item.year ? ` · ${item.year}` : ""}
+                  </span>
+                  <span className={`pill ${item.missingCount === 0 ? "good" : "neutral"}`}>
+                    {item.missingCount === 0 ? (item.answerKeyStatus === "admin-verified" ? "Verified" : "All keys set") : `${item.missingCount} key(s) missing`}
+                  </span>
+                </button>
+                <button type="button" className="secondary-button" onClick={async () => {
+                  if (!window.confirm(`Remove “${item.title}” from the public library? Existing attempts will be preserved.`)) return;
+                  try { await api.delete(`/admin/exams/${item.id}`); setNotice("Paper removed from the public library."); if (selectedId === item.id) { setSelectedId(""); setExam(null); } await loadExams(); }
+                  catch (e) { setError(e.response?.data?.message || "Could not remove paper."); }
+                }}>Remove public paper</button>
+              </div>
             ))
           ) : (
             <p className="muted empty-note">No published papers yet.</p>
@@ -1309,15 +1314,26 @@ function UploadPage({ onCreated }) {
       const extractedQuestions = paperResponse.data.questions || [];
       const parsedAnswers = normalizeAnswerKey(keyResponse.data);
 
-      const mergedQuestions = extractedQuestions.map((question, index) => ({
-        ...question,
-        correctIndex:
-          Number.isInteger(parsedAnswers[index]) &&
-          parsedAnswers[index] >= 0 &&
-          parsedAnswers[index] < (question.options || []).length
-            ? parsedAnswers[index]
-            : (question.correctIndex ?? null)
-      }));
+      const rawKeyEntries = Array.isArray(keyResponse.data.answers) ? keyResponse.data.answers : [];
+      const mergedQuestions = extractedQuestions.map((question, index) => {
+        const questionType = question.questionType || (question.type === "integer" ? "integer" : "mcq");
+        const questionNumber = Number(question.questionNumber || index + 1);
+        const keyEntry = rawKeyEntries.find(item => Number(item.questionNumber || item.question || item.number) === questionNumber) || rawKeyEntries[index];
+        const rawNumericAnswer = keyEntry && typeof keyEntry === "object"
+          ? (keyEntry.answer ?? keyEntry.correctAnswer ?? keyEntry.value ?? keyEntry.correctValue)
+          : null;
+        const correctValue = questionType === "mcq" ? "" : String(question.correctValue ?? question.correctAnswer ?? rawNumericAnswer ?? "").trim();
+        const parsedIndex = parsedAnswers[index];
+        return {
+          ...question,
+          questionType,
+          options: questionType === "mcq" ? (question.options || []) : [],
+          correctValue,
+          correctIndex: questionType === "mcq"
+            ? (Number.isInteger(parsedIndex) && parsedIndex >= 0 && parsedIndex < (question.options || []).length ? parsedIndex : (question.correctIndex ?? null))
+            : null
+        };
+      });
 
       setRawText(paperResponse.data.extractedText || "");
       setAnswerKeyText(
@@ -1367,8 +1383,10 @@ function UploadPage({ onCreated }) {
       ...old,
       {
         text: "",
+        questionType: "mcq",
         options: ["", "", "", ""],
         correctIndex: null,
+        correctValue: "",
         explanation: ""
       }
     ]);
@@ -1441,15 +1459,9 @@ function UploadPage({ onCreated }) {
 
     const invalidQuestion = questions.findIndex(q =>
       !q.text?.trim() ||
-      !Array.isArray(q.options) ||
-      q.options.length < 2 ||
-      q.options.some(option => !String(option).trim()) ||
-      q.correctIndex === null ||
-      q.correctIndex === undefined ||
-      q.correctIndex === "" ||
-      !Number.isInteger(Number(q.correctIndex)) ||
-      Number(q.correctIndex) < 0 ||
-      Number(q.correctIndex) >= q.options.length
+      (q.questionType === "mcq"
+        ? !Array.isArray(q.options) || q.options.length < 2 || q.options.some(option => !String(option).trim()) || q.correctIndex === null || q.correctIndex === undefined || q.correctIndex === "" || !Number.isInteger(Number(q.correctIndex)) || Number(q.correctIndex) < 0 || Number(q.correctIndex) >= q.options.length
+        : !String(q.correctValue || "").trim() || !Number.isFinite(Number(q.correctValue)))
     );
 
     if (invalidQuestion !== -1) {
@@ -1474,7 +1486,8 @@ function UploadPage({ onCreated }) {
         answerKeyFileName: answerKeyFile.name,
         questions: questions.map(q => ({
           ...q,
-          correctIndex: Number(q.correctIndex)
+          correctIndex: q.questionType === "mcq" ? Number(q.correctIndex) : null,
+          correctValue: q.questionType === "mcq" ? "" : String(q.correctValue)
         }))
       });
 
@@ -1816,7 +1829,21 @@ function UploadPage({ onCreated }) {
                 />
               </label>
 
-              <div className="option-editor-list">
+              <label className="explanation-label">
+                Question type
+                <select value={q.questionType || "mcq"} onChange={e => updateQ(qi, { questionType: e.target.value, options: e.target.value === "mcq" ? (q.options?.length ? q.options : ["", "", "", ""]) : [], correctIndex: null, correctValue: q.correctValue || "" })}>
+                  <option value="mcq">Multiple choice (MCQ)</option>
+                  <option value="integer">Integer answer</option>
+                  <option value="numeric">Numerical answer</option>
+                </select>
+              </label>
+
+              {(q.questionType || "mcq") !== "mcq" ? (
+                <label className="explanation-label">
+                  Correct numeric answer (private answer key)
+                  <input value={q.correctValue || ""} inputMode="decimal" onChange={e => updateQ(qi, { correctValue: e.target.value })} placeholder="Enter correct number" />
+                </label>
+              ) : <div className="option-editor-list">
                 {q.options.map((opt, oi) => (
                   <div className="option-editor" key={oi}>
                     <button
@@ -1850,9 +1877,9 @@ function UploadPage({ onCreated }) {
                     )}
                   </div>
                 ))}
-              </div>
+              </div>}
 
-              {q.options.length < 6 && (
+              {(q.questionType || "mcq") === "mcq" && q.options.length < 6 && (
                 <button
                   type="button"
                   className="text-link add-option"
@@ -2070,10 +2097,7 @@ function AttemptPage() {
 
       await api.post(`/attempts/${id}/submit`);
       setSubmitted(true);
-
-      const full = await api.get(`/attempts/${id}`);
-      setData(full.data);
-      setAnswers(full.data.attempt.answers || answers);
+      navigate("/", { replace: true });
     } catch (e) {
       setError(
         e.response?.data?.message || "Submission failed. Please try again."
@@ -2082,7 +2106,7 @@ function AttemptPage() {
       setSaving(false);
       setShowConfirm(false);
     }
-  }, [id, answers, submitted]);
+  }, [id, answers, submitted, navigate]);
 
   useEffect(() => {
     if (!data || submitted || data.attempt.status === "submitted") return;
@@ -2208,7 +2232,12 @@ function AttemptPage() {
 
             <h2>{q.text}</h2>
 
-            <div className="answer-options">
+            {(q.questionType || "mcq") !== "mcq" ? (
+              <label className="explanation-label numeric-answer-input">
+                Your numeric answer
+                <input type="number" step="any" value={answers[q.id] ?? ""} onChange={e => selectOption(e.target.value)} placeholder="Enter your answer" />
+              </label>
+            ) : <div className="answer-options">
               {q.options.map((opt, i) => (
                 <button
                   key={i}
@@ -2224,7 +2253,7 @@ function AttemptPage() {
                   </span>
                 </button>
               ))}
-            </div>
+            </div>}
           </div>
 
           <div className="test-question-footer">
@@ -2401,16 +2430,22 @@ function ResultView({ data, answers }) {
             {qs.map((q, i) => {
               const selected = answers[q.id];
               const key = q.correctIndex;
-              const graded = key !== null && key !== undefined;
+              const numericQuestion = (q.questionType || "mcq") !== "mcq";
+              const graded = numericQuestion
+                ? String(q.correctValue ?? "").trim() !== ""
+                : key !== null && key !== undefined;
+              const isCorrect = numericQuestion
+                ? selected !== undefined && Math.abs(Number(selected) - Number(q.correctValue)) <= Number(q.answerTolerance || 0)
+                : selected === key;
 
               return (
                 <article className="panel review-card" key={q.id}>
                   <div className="review-card-title">
                     <span className="question-number">Q{i + 1}</span>
-                    <span className={`pill ${!graded ? "neutral" : selected === key ? "good" : "bad"}`}>
+                    <span className={`pill ${!graded ? "neutral" : isCorrect ? "good" : "bad"}`}>
                       {!graded
                         ? "Ungraded"
-                        : selected === key
+                        : isCorrect
                           ? "Correct"
                           : selected === undefined
                             ? "Unanswered"
@@ -2420,7 +2455,12 @@ function ResultView({ data, answers }) {
 
                   <h3>{q.text}</h3>
 
-                  <div className="review-options">
+                  {(q.questionType || "mcq") !== "mcq" ? (
+                    <div className="review-options">
+                      <p>Your answer: {selected === undefined ? "Unanswered" : selected}</p>
+                      <p>Correct answer: {q.correctValue}</p>
+                    </div>
+                  ) : <div className="review-options">
                     {q.options.map((o, j) => (
                       <div
                         key={j}
@@ -2431,9 +2471,9 @@ function ResultView({ data, answers }) {
                         {graded && j === key && <CheckCircle2 size={16} />}
                       </div>
                     ))}
-                  </div>
+                  </div>}
 
-                  {selected !== undefined && (
+                  {(q.questionType || "mcq") === "mcq" && selected !== undefined && (
                     <p className="muted small">
                       Your answer: {String.fromCharCode(65 + selected)}.{" "}
                       {q.options[selected]}

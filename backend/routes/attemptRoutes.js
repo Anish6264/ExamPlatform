@@ -16,10 +16,13 @@ function publicExam(exam, revealAnswers = false) {
     questions: exam.questions.map(question => ({
       id: question._id,
       text: question.text,
+      questionType: question.questionType || "mcq",
       options: question.options,
       ...(revealAnswers
         ? {
             correctIndex: question.correctIndex,
+            correctValue: question.correctValue || "",
+            answerTolerance: question.answerTolerance || 0,
             explanation: question.explanation
           }
         : {})
@@ -38,61 +41,31 @@ function canAccessExam(exam, userId) {
 }
 
 function calculateResult(exam, attempt, submittedAt) {
-  let correct = 0;
-  let incorrect = 0;
-  let unanswered = 0;
-  let ungraded = 0;
-  let score = 0;
-  let maxScore = 0;
-
+  let correct = 0, incorrect = 0, unanswered = 0, ungraded = 0, score = 0, maxScore = 0;
   for (const question of exam.questions) {
     const questionId = String(question._id);
     const answer = attempt.answers.get(questionId);
-
-    if (
-      question.correctIndex === null ||
-      question.correctIndex === undefined
-    ) {
-      ungraded++;
-
-      if (answer === undefined) unanswered++;
-      continue;
-    }
-
+    const type = question.questionType || "mcq";
+    const hasKey = type === "mcq"
+      ? question.correctIndex !== null && question.correctIndex !== undefined
+      : String(question.correctValue || "").trim() !== "";
+    if (!hasKey) { ungraded++; if (answer === undefined) unanswered++; continue; }
     maxScore += exam.marksPerQuestion;
-
-    if (answer === undefined) {
-      unanswered++;
-    } else if (answer === question.correctIndex) {
-      correct++;
-      score += exam.marksPerQuestion;
-    } else {
-      incorrect++;
-      score -= exam.negativeMarks;
+    if (answer === undefined || answer === null || answer === "") { unanswered++; continue; }
+    let isCorrect = false;
+    if (type === "mcq") isCorrect = Number(answer) === Number(question.correctIndex);
+    else {
+      const actual = Number(answer), expected = Number(question.correctValue);
+      isCorrect = Number.isFinite(actual) && Number.isFinite(expected) && Math.abs(actual - expected) <= Number(question.answerTolerance || 0);
     }
+    if (isCorrect) { correct++; score += exam.marksPerQuestion; }
+    else { incorrect++; score -= exam.negativeMarks; }
   }
-
   score = Math.max(0, Number(score.toFixed(2)));
-
   return {
-    correct,
-    incorrect,
-    unanswered,
-    ungraded,
-    score,
-    maxScore,
-    percentage: maxScore
-      ? Number((score / maxScore * 100).toFixed(2))
-      : 0,
-    timeTakenSeconds: Math.max(
-      0,
-      Math.min(
-        Math.floor((submittedAt - attempt.startedAt) / 1000),
-        Math.floor(
-          (attempt.deadlineAt - attempt.startedAt) / 1000
-        )
-      )
-    )
+    correct, incorrect, unanswered, ungraded, score, maxScore,
+    percentage: maxScore ? Number((score / maxScore * 100).toFixed(2)) : 0,
+    timeTakenSeconds: Math.max(0, Math.min(Math.floor((submittedAt - attempt.startedAt) / 1000), Math.floor((attempt.deadlineAt - attempt.startedAt) / 1000)))
   };
 }
 
@@ -109,10 +82,10 @@ router.post("/start/:examId", auth, async (req, res, next) => {
       return res.status(404).json({ message: "Test not found." });
     }
 
-    const missingAnswerIndex = exam.questions.findIndex(
-      question =>
-        question.correctIndex === null ||
-        question.correctIndex === undefined
+    const missingAnswerIndex = exam.questions.findIndex(question =>
+      (question.questionType || "mcq") === "mcq"
+        ? question.correctIndex === null || question.correctIndex === undefined
+        : !String(question.correctValue || "").trim()
     );
 
     if (missingAnswerIndex !== -1) {
@@ -188,9 +161,8 @@ router.get("/:id", auth, async (req, res, next) => {
 
     const exam = await Exam.findById(attempt.exam);
 
-    if (!exam || !canAccessExam(exam, req.userId)) {
-      return res.status(404).json({ message: "Test not found." });
-    }
+    // An existing attempt remains accessible if an admin later unpublishes the exam.
+    if (!exam) return res.status(404).json({ message: "Test not found." });
 
     if (
       attempt.status === "in-progress" &&
@@ -253,9 +225,8 @@ router.put("/:id/answers", auth, async (req, res, next) => {
 
     const exam = await Exam.findById(attempt.exam);
 
-    if (!exam || !canAccessExam(exam, req.userId)) {
-      return res.status(404).json({ message: "Test not found." });
-    }
+    // An existing attempt remains accessible if an admin later unpublishes the exam.
+    if (!exam) return res.status(404).json({ message: "Test not found." });
 
     const answers = req.body.answers || {};
 
@@ -270,19 +241,17 @@ router.put("/:id/answers", auth, async (req, res, next) => {
 
       if (value === null || value === undefined || value === "") {
         attempt.answers.delete(questionId);
+      } else if (["integer", "numeric"].includes(question.questionType)) {
+        const numeric = String(value).trim();
+        if (!/^-?\d+(?:\.\d+)?$/.test(numeric) || numeric.length > 40) {
+          return res.status(400).json({ message: "Enter a valid numeric answer." });
+        }
+        attempt.answers.set(questionId, numeric);
       } else {
         const selectedIndex = Number(value);
-
-        if (
-          !Number.isInteger(selectedIndex) ||
-          selectedIndex < 0 ||
-          selectedIndex >= question.options.length
-        ) {
-          return res.status(400).json({
-            message: "Invalid option selected."
-          });
+        if (!Number.isInteger(selectedIndex) || selectedIndex < 0 || selectedIndex >= question.options.length) {
+          return res.status(400).json({ message: "Invalid option selected." });
         }
-
         attempt.answers.set(questionId, selectedIndex);
       }
     }
@@ -323,9 +292,8 @@ router.post("/:id/submit", auth, async (req, res, next) => {
 
     const exam = await Exam.findById(attempt.exam);
 
-    if (!exam || !canAccessExam(exam, req.userId)) {
-      return res.status(404).json({ message: "Test not found." });
-    }
+    // An existing attempt remains accessible if an admin later unpublishes the exam.
+    if (!exam) return res.status(404).json({ message: "Test not found." });
 
     const now = new Date();
 
