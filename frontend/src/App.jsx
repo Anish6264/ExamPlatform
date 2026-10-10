@@ -1316,14 +1316,14 @@ function UploadPage({ onCreated }) {
 
       const rawKeyEntries = Array.isArray(keyResponse.data.answers) ? keyResponse.data.answers : [];
       const mergedQuestions = extractedQuestions.map((question, index) => {
-        const questionType = question.questionType || (question.type === "integer" ? "integer" : "mcq");
+        const questionType = question.questionType || (["integer", "numeric"].includes(question.type) ? question.type : "mcq");
         const questionNumber = Number(question.questionNumber || index + 1);
         const keyEntry = rawKeyEntries.find(item => Number(item.questionNumber || item.question || item.number) === questionNumber) || rawKeyEntries[index];
         const rawNumericAnswer = keyEntry && typeof keyEntry === "object"
           ? (keyEntry.answer ?? keyEntry.correctAnswer ?? keyEntry.value ?? keyEntry.correctValue)
           : null;
         const correctValue = questionType === "mcq" ? "" : String(question.correctValue ?? question.correctAnswer ?? rawNumericAnswer ?? "").trim();
-        const parsedIndex = parsedAnswers[index];
+        const parsedIndex = parsedAnswers[questionNumber - 1] ?? parsedAnswers[index];
         return {
           ...question,
           questionType,

@@ -41,7 +41,7 @@ export async function extractPdfText(buffer) {
   return {
     pageCount: pdf.numPages,
     lines: cleaned,
-    extractedText: cleaned.join("\n").slice(0, 100000)
+    extractedText: cleaned.join("\n")
   };
 }
 
@@ -69,6 +69,7 @@ export async function extractQuestions(buffer) {
       }
 
       current = {
+        questionNumber: Number(line.match(/^(?:Q(?:uestion)?\s*)?(\d{1,3})/i)?.[1] || questions.length + 1),
         text: questionMatch[1].trim(),
         options: [],
         correctIndex: null,
@@ -88,11 +89,11 @@ export async function extractQuestions(buffer) {
     extractedText,
     questions: questions
       .filter(question => question.options.length >= 2)
-      .map(question => ({
+      .map((question, index) => ({
         ...question,
+        questionNumber: question.questionNumber || index + 1,
         options: question.options.slice(0, 6)
       }))
-      .slice(0, 300)
   };
 }
 
@@ -118,7 +119,7 @@ export async function extractAnswerKey(buffer) {
         const questionNumber = Number(match[1]);
         const letter = match[2].toUpperCase();
 
-        if (questionNumber >= 1 && questionNumber <= 300) {
+        if (questionNumber >= 1 && questionNumber <= 2000) {
           answers.set(
             questionNumber,
             letter.charCodeAt(0) - 65

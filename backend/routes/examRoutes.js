@@ -135,8 +135,17 @@ router.get("/public", auth, async (req, res, next) => {
       counts.map(item => [String(item._id), item.count])
     );
 
-    const userIds = [...new Set(exams.map(exam => String(exam.user)))];
-    const users = await User.find({ _id: { $in: userIds } }).select("name");
+    // Older or incomplete records may not have a valid uploader reference.
+    // Never pass "undefined" (or another invalid value) into a MongoDB _id query.
+    const userIds = [...new Set(
+      exams
+        .map(exam => exam.user)
+        .filter(id => id && mongoose.isValidObjectId(id))
+        .map(id => String(id))
+    )];
+    const users = userIds.length
+      ? await User.find({ _id: { $in: userIds } }).select("name")
+      : [];
     const userNames = new Map(users.map(user => [String(user._id), user.name]));
     res.json({
       exams: exams.map(exam => ({
@@ -172,8 +181,17 @@ router.get("/", auth, async (req, res, next) => {
       counts.map(item => [String(item._id), item.count])
     );
 
-    const userIds = [...new Set(exams.map(exam => String(exam.user)))];
-    const users = await User.find({ _id: { $in: userIds } }).select("name");
+    // Older or incomplete records may not have a valid uploader reference.
+    // Never pass "undefined" (or another invalid value) into a MongoDB _id query.
+    const userIds = [...new Set(
+      exams
+        .map(exam => exam.user)
+        .filter(id => id && mongoose.isValidObjectId(id))
+        .map(id => String(id))
+    )];
+    const users = userIds.length
+      ? await User.find({ _id: { $in: userIds } }).select("name")
+      : [];
     const userNames = new Map(users.map(user => [String(user._id), user.name]));
     res.json({
       exams: exams.map(exam => ({
